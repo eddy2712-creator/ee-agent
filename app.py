@@ -1,4 +1,5 @@
 import os
+import requests
 import resend
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
@@ -11,6 +12,8 @@ app = Flask(__name__)
 resend.api_key = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_FROM")
 EMAIL_TO = os.getenv("EMAIL_TO")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
+DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
 
 
 def send_email(subject, html_content):
@@ -61,6 +64,28 @@ def webhook():
     """
 
     send_email(subject, html_content)
+
+    # Send call data to Concord AI Dashboard
+    if DASHBOARD_URL:
+        try:
+            requests.post(
+                f"{DASHBOARD_URL}/api/call",
+                json={
+                    "agent_id": call.get("agent_id"),
+                    "call_id": call.get("call_id"),
+                    "from_number": from_number,
+                    "duration_ms": duration_ms,
+                    "call_summary": summary,
+                    "user_sentiment": sentiment,
+                    "support_type": support_type,
+                    "call_successful": successful,
+                },
+                headers={"X-API-Key": DASHBOARD_API_KEY},
+                timeout=5,
+            )
+        except Exception:
+            pass  # Don't let dashboard issues break email delivery
+
     return jsonify({"status": "email_sent"}), 200
 
 
