@@ -42,6 +42,7 @@ def webhook():
     sentiment = analysis.get("user_sentiment", "Unknown")
     support_type = custom.get("support_type", "general")
     successful = analysis.get("call_successful", False)
+    lead_temperature = custom.get("lead_temperature", "Unknown")
     caller_name = custom.get("caller_name", "")
     caller_phone = custom.get("caller_phone", "")
     caller_email = custom.get("caller_email", "")
@@ -49,6 +50,18 @@ def webhook():
     duration_ms = call.get("duration_ms", 0)
     duration_sec = round(duration_ms / 1000)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Build transcript section
+    transcript_text = ""
+    transcript = call.get("transcript_object", [])
+    if transcript:
+        lines = []
+        for entry in transcript:
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            speaker = "Emily" if role == "agent" else "Caller"
+            lines.append(f"<p><strong>{speaker}:</strong> {content}</p>")
+        transcript_text = "\n".join(lines)
 
     display_name = caller_name or from_number or "Unknown"
     subject = f"E&E Call Summary — {support_type} from {display_name}"
@@ -62,10 +75,18 @@ def webhook():
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Phone:</strong></td><td>{caller_phone or from_number}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Email:</strong></td><td>{caller_email or "Not provided"}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Type:</strong></td><td>{support_type}</td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Lead Temperature:</strong></td><td>{lead_temperature}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Sentiment:</strong></td><td>{sentiment}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Duration:</strong></td><td>{duration_sec} seconds</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Time:</strong></td><td>{timestamp}</td></tr>
     </table>
+    """
+
+    if transcript_text:
+        html_content += f"""
+    <hr>
+    <h3>Full Transcript</h3>
+    {transcript_text}
     """
 
     send_email(subject, html_content)
