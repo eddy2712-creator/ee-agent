@@ -91,7 +91,7 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "version": "2.1"}), 200
 
 
 if __name__ == "__main__":
