@@ -42,23 +42,28 @@ def webhook():
     sentiment = analysis.get("user_sentiment", "Unknown")
     support_type = custom.get("support_type", "general")
     successful = analysis.get("call_successful", False)
+    caller_name = custom.get("caller_name", "")
+    caller_phone = custom.get("caller_phone", "")
+    caller_email = custom.get("caller_email", "")
     from_number = call.get("from_number", "Unknown")
     duration_ms = call.get("duration_ms", 0)
     duration_sec = round(duration_ms / 1000)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    subject = f"E&E Call Summary — {support_type} from {from_number}"
+    display_name = caller_name or from_number or "Unknown"
+    subject = f"E&E Call Summary — {support_type} from {display_name}"
 
     html_content = f"""
     <h2>New Call Summary</h2>
     <p><strong>Summary:</strong> {summary}</p>
     <hr>
     <table style="border-collapse: collapse;">
-        <tr><td style="padding: 4px 12px 4px 0;"><strong>Caller:</strong></td><td>{from_number}</td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Name:</strong></td><td>{caller_name or "Not provided"}</td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Phone:</strong></td><td>{caller_phone or from_number}</td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Email:</strong></td><td>{caller_email or "Not provided"}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Type:</strong></td><td>{support_type}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Sentiment:</strong></td><td>{sentiment}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Duration:</strong></td><td>{duration_sec} seconds</td></tr>
-        <tr><td style="padding: 4px 12px 4px 0;"><strong>Successful:</strong></td><td>{"Yes" if successful else "No"}</td></tr>
         <tr><td style="padding: 4px 12px 4px 0;"><strong>Time:</strong></td><td>{timestamp}</td></tr>
     </table>
     """
