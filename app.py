@@ -38,7 +38,7 @@ def webhook():
     analysis = call.get("call_analysis", {})
     custom = analysis.get("custom_analysis_data", {})
 
-    summary = analysis.get("call_summary", "No summary available")
+    summary = custom.get("detailed_summary") or analysis.get("call_summary", "No summary available")
     sentiment = analysis.get("user_sentiment", "Unknown")
     support_type = custom.get("support_type", "general")
     successful = analysis.get("call_successful", False)
