@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from twilio.rest import Client as TwilioClient
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
 
 load_dotenv()
 
@@ -259,6 +262,56 @@ def forward_off():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "version": "2.3"}), 200
+
+
+# --- Scheduled call forwarding reminders ---
+
+MT = pytz.timezone("America/Edmonton")
+
+
+def send_forward_on_sms():
+    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
+        return
+    try:
+        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio.messages.create(
+            body=(
+                "Hey Craig, time to start call forwarding for the evening.\n\n"
+                "Dial this on your phone:\n"
+                "**61*15795893235**15#\n\n"
+                "This sends unanswered calls to Emily after 15 seconds. "
+                "You'll get another text at 7am to turn it off."
+            ),
+            from_=TWILIO_FROM_NUMBER,
+            to=CRAIG_PHONE,
+        )
+    except Exception:
+        pass
+
+
+def send_forward_off_sms():
+    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
+        return
+    try:
+        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio.messages.create(
+            body=(
+                "Good morning Craig! Time to turn off call forwarding.\n\n"
+                "Dial this on your phone:\n"
+                "##002#\n\n"
+                "This stops forwarding so calls come straight to you."
+            ),
+            from_=TWILIO_FROM_NUMBER,
+            to=CRAIG_PHONE,
+        )
+    except Exception:
+        pass
+
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(send_forward_on_sms, CronTrigger(hour=18, minute=0, timezone=MT))
+scheduler.add_job(send_forward_off_sms, CronTrigger(hour=7, minute=0, timezone=MT))
+scheduler.start()
 
 
 if __name__ == "__main__":
