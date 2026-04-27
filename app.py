@@ -207,6 +207,53 @@ def lookup_caller():
 
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
+FORWARD_ON_CODE = "**61*15795893235**15#"
+FORWARD_OFF_CODE = "##002#"
+
+
+def dial_page(title, code, description):
+    encoded = code.replace("*", "%2A").replace("#", "%23")
+    return f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; text-align: center; padding: 40px 20px; background: #f9f9f9; }}
+  .card {{ background: white; border-radius: 16px; padding: 32px; max-width: 400px; margin: 0 auto; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }}
+  h1 {{ font-size: 22px; margin-bottom: 8px; }}
+  .code {{ font-family: monospace; font-size: 24px; font-weight: bold; background: #f0f0f0; padding: 16px; border-radius: 8px; margin: 20px 0; letter-spacing: 2px; }}
+  .btn {{ display: inline-block; background: #2563eb; color: white; padding: 18px 36px; font-size: 20px; text-decoration: none; border-radius: 12px; margin-top: 16px; }}
+  .btn:active {{ background: #1d4ed8; }}
+  .desc {{ color: #666; font-size: 14px; margin-top: 16px; }}
+</style>
+</head><body>
+<div class="card">
+  <h1>{title}</h1>
+  <div class="code">{code}</div>
+  <a href="tel:{encoded}" class="btn">📞 Tap to Dial</a>
+  <p class="desc">{description}</p>
+</div>
+</body></html>"""
+
+
+@app.route("/dial/forward-on")
+def dial_forward_on():
+    return dial_page(
+        "Start Call Forwarding",
+        FORWARD_ON_CODE,
+        "This sends unanswered calls to Emily after 15 seconds.",
+    )
+
+
+@app.route("/dial/forward-off")
+def dial_forward_off():
+    return dial_page(
+        "Stop Call Forwarding",
+        FORWARD_OFF_CODE,
+        "This stops forwarding so calls come straight to you.",
+    )
+
 
 @app.route("/cron/forward-on", methods=["POST"])
 def forward_on():
@@ -249,9 +296,9 @@ def send_forward_on_email():
             "subject": "Evening Reminder — Start Call Forwarding",
             "html": """
 <h3>Hey Craig, time to start call forwarding for the evening.</h3>
-<p>Open your phone dialer and type this code:</p>
-<p style="background: #f0f0f0; padding: 20px; border-radius: 8px; text-align: center; margin: 16px 0;"><span style="font-size: 28px; font-family: monospace; font-weight: bold; letter-spacing: 2px;">**61*15795893235**15#</span></p>
-<p style="color: #666; font-size: 13px;">Then hit the call button. This sends unanswered calls to Emily after 15 seconds.<br>You'll get another email at 7am to turn it off.</p>
+<p>Tap the button below — it'll open a page where you can dial the code in one tap:</p>
+<p><a href="https://ee-agent-production.up.railway.app/dial/forward-on" style="display: inline-block; background: #2563eb; color: white; padding: 16px 32px; font-size: 18px; text-decoration: none; border-radius: 8px;">📞 Start Call Forwarding</a></p>
+<p style="color: #666; font-size: 13px;">This sends unanswered calls to Emily after 15 seconds.<br>You'll get another email at 7am to turn it off.</p>
 <hr>
 <p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
 """,
@@ -268,9 +315,9 @@ def send_forward_off_email():
             "subject": "Morning Reminder — Stop Call Forwarding",
             "html": """
 <h3>Good morning Craig! Time to turn off call forwarding.</h3>
-<p>Open your phone dialer and type this code:</p>
-<p style="background: #f0f0f0; padding: 20px; border-radius: 8px; text-align: center; margin: 16px 0;"><span style="font-size: 28px; font-family: monospace; font-weight: bold; letter-spacing: 2px;">##002#</span></p>
-<p style="color: #666; font-size: 13px;">Then hit the call button. This stops forwarding so calls come straight to you.</p>
+<p>Tap the button below — it'll open a page where you can dial the code in one tap:</p>
+<p><a href="https://ee-agent-production.up.railway.app/dial/forward-off" style="display: inline-block; background: #2563eb; color: white; padding: 16px 32px; font-size: 18px; text-decoration: none; border-radius: 8px;">📞 Stop Call Forwarding</a></p>
+<p style="color: #666; font-size: 13px;">This stops forwarding so calls come straight to you.</p>
 <hr>
 <p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
 """,
