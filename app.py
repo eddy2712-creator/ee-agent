@@ -212,23 +212,8 @@ CRON_SECRET = os.getenv("CRON_SECRET", "")
 def forward_on():
     if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
         return jsonify({"error": "unauthorized"}), 401
-
-    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
-        return jsonify({"error": "missing config"}), 500
-
     try:
-        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        twilio.messages.create(
-            body=(
-                "Hey Craig, time to start call forwarding for the evening.\n\n"
-                "Dial this on your phone:\n"
-                "**61*15795893235**15#\n\n"
-                "This sends unanswered calls to Emily after 15 seconds. "
-                "You'll get another text at 7am to turn it off."
-            ),
-            from_=TWILIO_FROM_NUMBER,
-            to=CRAIG_PHONE,
-        )
+        send_forward_on_email()
         return jsonify({"status": "sent", "type": "forward_on"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -238,22 +223,8 @@ def forward_on():
 def forward_off():
     if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
         return jsonify({"error": "unauthorized"}), 401
-
-    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
-        return jsonify({"error": "missing config"}), 500
-
     try:
-        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        twilio.messages.create(
-            body=(
-                "Good morning Craig! Time to turn off call forwarding.\n\n"
-                "Dial this on your phone:\n"
-                "##002#\n\n"
-                "This stops forwarding so calls come straight to you."
-            ),
-            from_=TWILIO_FROM_NUMBER,
-            to=CRAIG_PHONE,
-        )
+        send_forward_off_email()
         return jsonify({"status": "sent", "type": "forward_off"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -264,53 +235,54 @@ def health():
     return jsonify({"status": "ok", "version": "2.3"}), 200
 
 
-# --- Scheduled call forwarding reminders ---
+# --- Scheduled call forwarding reminders (via email) ---
 
+CRAIG_EMAIL = os.getenv("CRAIG_EMAIL", "info@eecontracting.ca")
 MT = pytz.timezone("America/Edmonton")
 
 
-def send_forward_on_sms():
-    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
-        return
+def send_forward_on_email():
     try:
-        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        twilio.messages.create(
-            body=(
-                "Hey Craig, time to start call forwarding for the evening.\n\n"
-                "Dial this on your phone:\n"
-                "**61*15795893235**15#\n\n"
-                "This sends unanswered calls to Emily after 15 seconds. "
-                "You'll get another text at 7am to turn it off."
-            ),
-            from_=TWILIO_FROM_NUMBER,
-            to=CRAIG_PHONE,
-        )
+        resend.Emails.send({
+            "from": EMAIL_FROM,
+            "to": [CRAIG_EMAIL],
+            "subject": "Evening Reminder — Start Call Forwarding",
+            "html": """
+<h3>Hey Craig, time to start call forwarding for the evening.</h3>
+<p>Dial this on your phone:</p>
+<h2 style="background: #f0f0f0; padding: 12px; display: inline-block; font-family: monospace;">**61*15795893235**15#</h2>
+<p>This sends unanswered calls to Emily after 15 seconds.</p>
+<p>You'll get another email at 7am to turn it off.</p>
+<hr>
+<p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
+""",
+        })
     except Exception:
         pass
 
 
-def send_forward_off_sms():
-    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
-        return
+def send_forward_off_email():
     try:
-        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        twilio.messages.create(
-            body=(
-                "Good morning Craig! Time to turn off call forwarding.\n\n"
-                "Dial this on your phone:\n"
-                "##002#\n\n"
-                "This stops forwarding so calls come straight to you."
-            ),
-            from_=TWILIO_FROM_NUMBER,
-            to=CRAIG_PHONE,
-        )
+        resend.Emails.send({
+            "from": EMAIL_FROM,
+            "to": [CRAIG_EMAIL],
+            "subject": "Morning Reminder — Stop Call Forwarding",
+            "html": """
+<h3>Good morning Craig! Time to turn off call forwarding.</h3>
+<p>Dial this on your phone:</p>
+<h2 style="background: #f0f0f0; padding: 12px; display: inline-block; font-family: monospace;">##002#</h2>
+<p>This stops forwarding so calls come straight to you.</p>
+<hr>
+<p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
+""",
+        })
     except Exception:
         pass
 
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_forward_on_sms, CronTrigger(hour=18, minute=0, timezone=MT))
-scheduler.add_job(send_forward_off_sms, CronTrigger(hour=7, minute=0, timezone=MT))
+scheduler.add_job(send_forward_on_email, CronTrigger(hour=18, minute=0, timezone=MT))
+scheduler.add_job(send_forward_off_email, CronTrigger(hour=7, minute=0, timezone=MT))
 scheduler.start()
 
 
