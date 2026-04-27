@@ -3,3 +3,4 @@ resend
 requests
 python-dotenv
 gunicorn
+twilio
