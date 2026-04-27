@@ -249,10 +249,9 @@ def send_forward_on_email():
             "subject": "Evening Reminder — Start Call Forwarding",
             "html": """
 <h3>Hey Craig, time to start call forwarding for the evening.</h3>
-<p>Dial this on your phone:</p>
-<h2 style="background: #f0f0f0; padding: 12px; display: inline-block; font-family: monospace;">**61*15795893235**15#</h2>
-<p>This sends unanswered calls to Emily after 15 seconds.</p>
-<p>You'll get another email at 7am to turn it off.</p>
+<p>Tap the button below to dial it automatically:</p>
+<p><a href="tel:**61*15795893235**15%23" style="display: inline-block; background: #2563eb; color: white; padding: 16px 24px; font-size: 18px; font-family: monospace; text-decoration: none; border-radius: 8px;">📞 Tap to Dial: **61*15795893235**15#</a></p>
+<p style="color: #666; font-size: 13px;">This sends unanswered calls to Emily after 15 seconds. You'll get another email at 7am to turn it off.</p>
 <hr>
 <p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
 """,
@@ -269,9 +268,9 @@ def send_forward_off_email():
             "subject": "Morning Reminder — Stop Call Forwarding",
             "html": """
 <h3>Good morning Craig! Time to turn off call forwarding.</h3>
-<p>Dial this on your phone:</p>
-<h2 style="background: #f0f0f0; padding: 12px; display: inline-block; font-family: monospace;">##002#</h2>
-<p>This stops forwarding so calls come straight to you.</p>
+<p>Tap the button below to dial it automatically:</p>
+<p><a href="tel:%23%23002%23" style="display: inline-block; background: #2563eb; color: white; padding: 16px 24px; font-size: 18px; font-family: monospace; text-decoration: none; border-radius: 8px;">📞 Tap to Dial: ##002#</a></p>
+<p style="color: #666; font-size: 13px;">This stops forwarding so calls come straight to you.</p>
 <hr>
 <p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
 """,
