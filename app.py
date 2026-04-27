@@ -202,9 +202,63 @@ def lookup_caller():
         return jsonify({"status": "new_caller", "message": "No previous calls found."})
 
 
+CRON_SECRET = os.getenv("CRON_SECRET", "")
+
+
+@app.route("/cron/forward-on", methods=["POST"])
+def forward_on():
+    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
+        return jsonify({"error": "missing config"}), 500
+
+    try:
+        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio.messages.create(
+            body=(
+                "Hey Craig, time to start call forwarding for the evening.\n\n"
+                "Dial this on your phone:\n"
+                "**61*15795893235**15#\n\n"
+                "This sends unanswered calls to Emily after 15 seconds. "
+                "You'll get another text at 7am to turn it off."
+            ),
+            from_=TWILIO_FROM_NUMBER,
+            to=CRAIG_PHONE,
+        )
+        return jsonify({"status": "sent", "type": "forward_on"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/cron/forward-off", methods=["POST"])
+def forward_off():
+    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if not CRAIG_PHONE or not TWILIO_ACCOUNT_SID:
+        return jsonify({"error": "missing config"}), 500
+
+    try:
+        twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio.messages.create(
+            body=(
+                "Good morning Craig! Time to turn off call forwarding.\n\n"
+                "Dial this on your phone:\n"
+                "##002#\n\n"
+                "This stops forwarding so calls come straight to you."
+            ),
+            from_=TWILIO_FROM_NUMBER,
+            to=CRAIG_PHONE,
+        )
+        return jsonify({"status": "sent", "type": "forward_off"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "2.2"}), 200
+    return jsonify({"status": "ok", "version": "2.3"}), 200
 
 
 if __name__ == "__main__":
