@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.git/
+backup_*.py
+backup_*.json
+test_results.json
+run_tests.py

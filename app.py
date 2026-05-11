@@ -5,9 +5,16 @@ from datetime import datetime, timezone
 from twilio.rest import Client as TwilioClient
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-import pytz
+
+try:
+    from ee_call_log import log_call
+except Exception:
+    log_call = None
+
+try:
+    import jobber_client
+except Exception:
+    jobber_client = None
 
 load_dotenv()
 
@@ -16,6 +23,7 @@ app = Flask(__name__)
 resend.api_key = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_FROM")
 EMAIL_TO = os.getenv("EMAIL_TO")
+EMAIL_CC = os.getenv("EMAIL_CC", "")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
 RETELL_API_KEY = os.getenv("RETELL_API_KEY", "")
@@ -26,13 +34,16 @@ CRAIG_PHONE = os.getenv("CRAIG_PHONE", "")
 
 
 def send_email(subject, html_content):
-    to_emails = [e.strip() for e in EMAIL_TO.split(",")]
-    resend.Emails.send({
+    to_emails = [e.strip() for e in EMAIL_TO.split(",") if e.strip()]
+    payload = {
         "from": EMAIL_FROM,
         "to": to_emails,
         "subject": subject,
         "html": html_content,
-    })
+    }
+    if EMAIL_CC:
+        payload["cc"] = [e.strip() for e in EMAIL_CC.split(",") if e.strip()]
+    resend.Emails.send(payload)
 
 
 @app.route("/webhook", methods=["POST"])
@@ -104,6 +115,13 @@ def webhook():
 
     send_email(subject, html_content)
 
+    # Append call to Google Sheet
+    if log_call is not None:
+        try:
+            log_call(call)
+        except Exception:
+            pass  # Don't let Sheets issues break email delivery
+
     # SMS alert to Craig for hot leads
     if lead_temperature == "Hot" and CRAIG_PHONE and TWILIO_ACCOUNT_SID:
         try:
@@ -121,6 +139,26 @@ def webhook():
             )
         except Exception:
             pass  # Don't let SMS issues break email delivery
+
+    # Push lead into Jobber (find-or-create client + attach call summary as a note)
+    if jobber_client is not None and jobber_client.is_configured():
+        try:
+            note_body = (
+                f"Call summary ({timestamp}):\n"
+                f"{summary}\n\n"
+                f"Service type: {support_type}\n"
+                f"Lead temperature: {lead_temperature}\n"
+                f"Preferred availability: {preferred_availability or 'not provided'}"
+            )
+            jobber_client.upsert_lead(
+                name=caller_name,
+                phone=caller_phone or from_number,
+                email=caller_email,
+                address=property_address,
+                call_summary=note_body,
+            )
+        except Exception:
+            pass  # Don't let Jobber issues break email delivery
 
     # Send call data to Concord AI Dashboard
     if DASHBOARD_URL:
@@ -205,8 +243,6 @@ def lookup_caller():
         return jsonify({"status": "new_caller", "message": "No previous calls found."})
 
 
-CRON_SECRET = os.getenv("CRON_SECRET", "")
-
 FORWARD_ON_CODE = "**61*15795893235**15#"
 FORWARD_OFF_CODE = "##002#"
 
@@ -255,81 +291,58 @@ def dial_forward_off():
     )
 
 
-@app.route("/cron/forward-on", methods=["POST"])
-def forward_on():
-    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
-        return jsonify({"error": "unauthorized"}), 401
-    try:
-        send_forward_on_email()
-        return jsonify({"status": "sent", "type": "forward_on"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route("/jobber/connect", methods=["GET"])
+def jobber_connect():
+    """Sara/Craig clicks this once to authorize the app. Redirects to Jobber."""
+    if jobber_client is None:
+        return "Jobber client not loaded", 500
+    return ("", 302, {"Location": jobber_client.authorize_url()})
 
 
-@app.route("/cron/forward-off", methods=["POST"])
-def forward_off():
-    if CRON_SECRET and request.headers.get("X-Cron-Secret") != CRON_SECRET:
-        return jsonify({"error": "unauthorized"}), 401
+@app.route("/jobber/callback", methods=["GET"])
+def jobber_callback():
+    """Jobber sends the user back here with ?code=... — we exchange it for tokens."""
+    if jobber_client is None:
+        return "Jobber client not loaded", 500
+
+    error = request.args.get("error")
+    if error:
+        return f"<h2>Authorization failed</h2><p>{error}</p>", 400
+
+    code = request.args.get("code", "")
+    if not code:
+        return "<h2>Missing authorization code</h2>", 400
+
     try:
-        send_forward_off_email()
-        return jsonify({"status": "sent", "type": "forward_off"})
+        tokens = jobber_client.exchange_code_for_tokens(code)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return f"<h2>Token exchange failed</h2><pre>{e}</pre>", 500
+
+    refresh_token = tokens.get("refresh_token", "")
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Jobber Connected</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; padding: 40px 20px; background: #f9f9f9; }}
+  .card {{ background: white; border-radius: 16px; padding: 32px; max-width: 700px; margin: 0 auto; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }}
+  h1 {{ color: #16a34a; }}
+  code {{ background: #f0f0f0; padding: 8px 12px; border-radius: 6px; font-size: 14px; word-break: break-all; display: block; margin: 12px 0; }}
+  .step {{ margin: 20px 0; padding: 16px; background: #f8fafc; border-left: 4px solid #2563eb; border-radius: 4px; }}
+</style></head><body>
+<div class="card">
+  <h1>✅ Jobber connected</h1>
+  <p>Authorization successful. Copy the refresh token below into Railway as the <strong>JOBBER_REFRESH_TOKEN</strong> environment variable, then redeploy.</p>
+  <div class="step">
+    <strong>Refresh token (copy this):</strong>
+    <code>{refresh_token}</code>
+  </div>
+  <p style="color: #666; font-size: 14px;">After you paste it into Railway and the service restarts, the agent will start pushing new callers into Jobber automatically.</p>
+</div>
+</body></html>"""
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "2.3"}), 200
-
-
-# --- Scheduled call forwarding reminders (via email) ---
-
-CRAIG_EMAIL = os.getenv("CRAIG_EMAIL", "info@eecontracting.ca")
-MT = pytz.timezone("America/Edmonton")
-
-
-def send_forward_on_email():
-    try:
-        resend.Emails.send({
-            "from": EMAIL_FROM,
-            "to": [CRAIG_EMAIL],
-            "subject": "Evening Reminder — Start Call Forwarding",
-            "html": """
-<h3>Hey Craig, time to start call forwarding for the evening.</h3>
-<p>Tap the button below — it'll open a page where you can dial the code in one tap:</p>
-<p><a href="https://ee-agent-production.up.railway.app/dial/forward-on" style="display: inline-block; background: #2563eb; color: white; padding: 16px 32px; font-size: 18px; text-decoration: none; border-radius: 8px;">📞 Start Call Forwarding</a></p>
-<p style="color: #666; font-size: 13px;">This sends unanswered calls to Emily after 15 seconds.<br>You'll get another email at 7am to turn it off.</p>
-<hr>
-<p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
-""",
-        })
-    except Exception:
-        pass
-
-
-def send_forward_off_email():
-    try:
-        resend.Emails.send({
-            "from": EMAIL_FROM,
-            "to": [CRAIG_EMAIL],
-            "subject": "Morning Reminder — Stop Call Forwarding",
-            "html": """
-<h3>Good morning Craig! Time to turn off call forwarding.</h3>
-<p>Tap the button below — it'll open a page where you can dial the code in one tap:</p>
-<p><a href="https://ee-agent-production.up.railway.app/dial/forward-off" style="display: inline-block; background: #2563eb; color: white; padding: 16px 32px; font-size: 18px; text-decoration: none; border-radius: 8px;">📞 Stop Call Forwarding</a></p>
-<p style="color: #666; font-size: 13px;">This stops forwarding so calls come straight to you.</p>
-<hr>
-<p style="color: #888; font-size: 12px;"><em>Automated reminder from E&amp;E AI system.</em></p>
-""",
-        })
-    except Exception:
-        pass
-
-
-scheduler = BackgroundScheduler()
-scheduler.add_job(send_forward_on_email, CronTrigger(hour=18, minute=0, timezone=MT))
-scheduler.add_job(send_forward_off_email, CronTrigger(hour=7, minute=0, timezone=MT))
-scheduler.start()
+    return jsonify({"status": "ok", "version": "2.9"}), 200
 
 
 if __name__ == "__main__":

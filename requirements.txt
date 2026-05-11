@@ -6,3 +6,5 @@ gunicorn
 twilio
 APScheduler
 pytz
+google-api-python-client
+google-auth

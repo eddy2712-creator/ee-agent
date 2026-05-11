@@ -1,2 +1,9 @@
 .env
 __pycache__/
+credentials/
+*.json.local
+.venv/
+.DS_Store
+backup_*.py
+backup_*.json
+test_results.json
