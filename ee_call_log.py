@@ -11,14 +11,16 @@ EE_SHEET_ID = os.getenv("EE_SHEET_ID", "")
 HEADERS = [
     "Timestamp", "Caller Name", "Summary", "Phone", "Email", "Address",
     "Service Type", "Lead Temperature", "Sentiment", "Duration (sec)",
-    "Successful", "From Number", "Call ID", "Agent ID",
+    "Successful", "From Number", "Spam Score", "Spam Risk", "Call ID", "Agent ID",
 ]
 
 
-def _values_for(call: dict) -> dict:
+def _values_for(call: dict, spam_result=None) -> dict:
     """Map header names -> values pulled from a Retell webhook `call` dict."""
     analysis = call.get("call_analysis", {})
     custom = analysis.get("custom_analysis_data", {})
+    spam = spam_result or {}
+    fraud_score = spam.get("fraud_score")
     return {
         "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
         "Caller Name": custom.get("caller_name", ""),
@@ -32,17 +34,19 @@ def _values_for(call: dict) -> dict:
         "Duration (sec)": round(call.get("duration_ms", 0) / 1000),
         "Successful": "Yes" if analysis.get("call_successful") else "No",
         "From Number": call.get("from_number", ""),
+        "Spam Score": fraud_score if fraud_score is not None else "",
+        "Spam Risk": spam.get("risk_level", "") or "",
         "Call ID": call.get("call_id", ""),
         "Agent ID": call.get("agent_id", ""),
     }
 
 
-def log_call(call: dict):
+def log_call(call: dict, spam_result=None):
     """Append one Retell call to the E&E sheet. `call` is the Retell webhook payload's `call` dict."""
     if not EE_SHEET_ID:
         return
 
-    values = _values_for(call)
+    values = _values_for(call, spam_result)
 
     # Read the sheet's current header order so a column reshuffle is picked up automatically.
     headers = read_headers(EE_SHEET_ID)

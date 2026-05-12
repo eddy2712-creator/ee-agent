@@ -16,6 +16,16 @@ try:
 except Exception:
     jobber_client = None
 
+try:
+    import spam_check
+except Exception:
+    spam_check = None
+
+try:
+    import feedback
+except Exception:
+    feedback = None
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -85,8 +95,13 @@ def webhook():
             lines.append(f"<p><strong>{speaker}:</strong> {content}</p>")
         transcript_text = "\n".join(lines)
 
+    # Spam / phone reputation lookup (fail-soft).
+    spam_result = spam_check.check_number(from_number) if spam_check else {"checked": False, "label": "Not checked", "risk_level": "unknown"}
+
     display_name = caller_name or from_number or "Unknown"
     subject = f"E&E Call Summary — {support_type} from {display_name}"
+    if spam_result.get("risk_level") == "high":
+        subject = "[Likely Spam] " + subject
 
     html_content = f"""
     <h2>New Call Summary</h2>
@@ -106,6 +121,33 @@ def webhook():
     </table>
     """
 
+    if spam_result.get("checked"):
+        risk_colors = {"high": "#dc2626", "medium": "#d97706", "low": "#65a30d", "clean": "#16a34a", "unknown": "#666"}
+        color = risk_colors.get(spam_result.get("risk_level", "unknown"), "#666")
+        score = spam_result.get("fraud_score")
+        score_text = f"{score}/100" if score is not None else "n/a"
+        flags = []
+        if spam_result.get("recent_abuse"):
+            flags.append("recent abuse")
+        if spam_result.get("risky"):
+            flags.append("risky")
+        if spam_result.get("voip"):
+            flags.append("VOIP")
+        if spam_result.get("prepaid"):
+            flags.append("prepaid")
+        flags_text = ", ".join(flags) if flags else "none"
+        carrier = spam_result.get("carrier") or spam_result.get("line_type") or "Unknown"
+        html_content += f"""
+    <hr>
+    <h3>Phone Reputation</h3>
+    <table style="border-collapse: collapse;">
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Risk:</strong></td><td><span style="color: {color}; font-weight: bold;">{spam_result.get('label', 'Unknown')}</span></td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Spam Score:</strong></td><td>{score_text}</td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Flags:</strong></td><td>{flags_text}</td></tr>
+        <tr><td style="padding: 4px 12px 4px 0;"><strong>Carrier / Line:</strong></td><td>{carrier}</td></tr>
+    </table>
+    """
+
     if transcript_text:
         html_content += f"""
     <hr>
@@ -118,7 +160,7 @@ def webhook():
     # Append call to Google Sheet
     if log_call is not None:
         try:
-            log_call(call)
+            log_call(call, spam_result)
         except Exception:
             pass  # Don't let Sheets issues break email delivery
 
@@ -140,8 +182,15 @@ def webhook():
         except Exception:
             pass  # Don't let SMS issues break email delivery
 
-    # Push lead into Jobber (find-or-create client + attach call summary as a note)
-    if jobber_client is not None and jobber_client.is_configured():
+    # Push lead into Jobber (find-or-create client + attach call summary as a note).
+    # Skip for instant hang-ups with no captured info, or for likely-spam numbers.
+    skip_jobber = False
+    if spam_check is not None:
+        skip_jobber = spam_check.should_skip_jobber(
+            spam_result, duration_sec, caller_name, caller_email, property_address
+        )
+
+    if jobber_client is not None and jobber_client.is_configured() and not skip_jobber:
         try:
             note_body = (
                 f"Call summary ({timestamp}):\n"
@@ -159,6 +208,31 @@ def webhook():
             )
         except Exception:
             pass  # Don't let Jobber issues break email delivery
+
+    # Post-call feedback survey: text the caller asking them to rate Emily.
+    # Gate: must be enabled, real conversation (>= 30s), not flagged spam, not the business owner's own number.
+    if (
+        feedback is not None
+        and feedback.is_enabled()
+        and TWILIO_ACCOUNT_SID
+        and TWILIO_FROM_NUMBER
+        and duration_sec >= 30
+        and spam_result.get("risk_level") not in ("high",)
+        and not spam_result.get("recent_abuse")
+        and from_number
+        and from_number != CRAIG_PHONE
+        and from_number != TWILIO_FROM_NUMBER
+    ):
+        try:
+            twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            feedback.send_survey(
+                twilio_client=twilio,
+                from_number_twilio=TWILIO_FROM_NUMBER,
+                to_phone=from_number,
+                call_id=call.get("call_id", ""),
+            )
+        except Exception:
+            pass  # Survey send is best-effort
 
     # Send call data to Concord AI Dashboard
     if DASHBOARD_URL:
@@ -182,6 +256,39 @@ def webhook():
             pass  # Don't let dashboard issues break email delivery
 
     return jsonify({"status": "email_sent"}), 200
+
+
+@app.route("/sms-feedback", methods=["POST"])
+def sms_feedback():
+    """Twilio inbound SMS webhook. Captures customer rating replies and emails the team."""
+    from_number = request.values.get("From", "")
+    body = request.values.get("Body", "")
+
+    twiml_empty = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+    if feedback is None or not body.strip():
+        return twiml_empty, 200, {"Content-Type": "text/xml"}
+
+    # Honor STOP / opt-out — Twilio handles unsubscribe automatically; we just don't log it.
+    if body.strip().upper() in ("STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"):
+        return twiml_empty, 200, {"Content-Type": "text/xml"}
+
+    record = feedback.record_reply(from_number, body)
+
+    try:
+        subject, html = feedback.format_email(record)
+        send_email(subject, html)
+    except Exception:
+        pass  # Don't break Twilio webhook on email failure
+
+    # Optional thank-you reply via TwiML (no extra Twilio API call needed).
+    rating = record.get("rating")
+    if rating:
+        thanks = f"Thanks for the {rating}/5 rating — we appreciate the feedback!"
+    else:
+        thanks = "Thanks for the feedback — we appreciate it!"
+    twiml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{thanks}</Message></Response>'
+    return twiml, 200, {"Content-Type": "text/xml"}
 
 
 @app.route("/lookup-caller", methods=["POST"])
