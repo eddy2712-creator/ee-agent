@@ -1,3 +1,4 @@
+import base64
 import os
 import requests
 import resend
@@ -43,7 +44,7 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
 CRAIG_PHONE = os.getenv("CRAIG_PHONE", "")
 
 
-def send_email(subject, html_content):
+def send_email(subject, html_content, attachments=None):
     to_emails = [e.strip() for e in EMAIL_TO.split(",") if e.strip()]
     payload = {
         "from": EMAIL_FROM,
@@ -53,7 +54,25 @@ def send_email(subject, html_content):
     }
     if EMAIL_CC:
         payload["cc"] = [e.strip() for e in EMAIL_CC.split(",") if e.strip()]
+    if attachments:
+        payload["attachments"] = attachments
     resend.Emails.send(payload)
+
+
+def fetch_recording_attachment(recording_url):
+    """Download a Retell call recording and return it as a Resend attachment dict.
+    Returns None on any failure so the summary email still goes out."""
+    if not recording_url:
+        return None
+    try:
+        resp = requests.get(recording_url, timeout=30)
+        resp.raise_for_status()
+        return {
+            "filename": "call-recording.mp3",
+            "content": base64.b64encode(resp.content).decode(),
+        }
+    except Exception:
+        return None
 
 
 @app.route("/webhook", methods=["POST"])
@@ -155,7 +174,9 @@ def webhook():
     {transcript_text}
     """
 
-    send_email(subject, html_content)
+    recording_attachment = fetch_recording_attachment(call.get("recording_url"))
+    attachments = [recording_attachment] if recording_attachment else None
+    send_email(subject, html_content, attachments=attachments)
 
     # Append call to Google Sheet
     if log_call is not None:
