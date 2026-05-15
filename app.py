@@ -1,5 +1,8 @@
 import base64
+import hashlib
+import hmac
 import os
+import time
 import requests
 import resend
 from datetime import datetime, timezone
@@ -42,6 +45,8 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
 CRAIG_PHONE = os.getenv("CRAIG_PHONE", "")
+ERICK_PHONE = os.getenv("ERICK_PHONE", "")
+RESEND_WEBHOOK_SECRET = os.getenv("RESEND_WEBHOOK_SECRET", "")
 
 
 def send_email(subject, html_content, attachments=None):
@@ -73,6 +78,29 @@ def fetch_recording_attachment(recording_url):
         }
     except Exception:
         return None
+
+
+def verify_svix_signature(secret, headers, raw_body):
+    """Verify a Svix-style webhook signature (used by Resend).
+    Returns True iff the signature matches and the timestamp is fresh (<5 min)."""
+    svix_id = headers.get("svix-id") or headers.get("Svix-Id", "")
+    svix_timestamp = headers.get("svix-timestamp") or headers.get("Svix-Timestamp", "")
+    svix_signature = headers.get("svix-signature") or headers.get("Svix-Signature", "")
+    if not (svix_id and svix_timestamp and svix_signature):
+        return False
+    try:
+        if abs(time.time() - int(svix_timestamp)) > 300:
+            return False
+    except ValueError:
+        return False
+    key = base64.b64decode(secret[6:]) if secret.startswith("whsec_") else secret.encode()
+    signed = f"{svix_id}.{svix_timestamp}.{raw_body.decode()}".encode()
+    expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+    for entry in svix_signature.split(" "):
+        version, _, signature = entry.partition(",")
+        if version == "v1" and hmac.compare_digest(signature, expected):
+            return True
+    return False
 
 
 @app.route("/webhook", methods=["POST"])
@@ -277,6 +305,45 @@ def webhook():
             pass  # Don't let dashboard issues break email delivery
 
     return jsonify({"status": "email_sent"}), 200
+
+
+@app.route("/resend-webhook", methods=["POST"])
+def resend_webhook():
+    """Receive Resend delivery events. On hard-bounce or spam-complaint, text Erick."""
+    if not RESEND_WEBHOOK_SECRET:
+        return jsonify({"status": "secret_not_configured"}), 503
+    raw_body = request.get_data()
+    if not verify_svix_signature(RESEND_WEBHOOK_SECRET, request.headers, raw_body):
+        return jsonify({"status": "invalid_signature"}), 401
+
+    payload = request.get_json(silent=True) or {}
+    event_type = payload.get("type", "")
+    if event_type not in ("email.bounced", "email.complained"):
+        return jsonify({"status": "ignored", "type": event_type}), 200
+
+    data = payload.get("data", {}) or {}
+    to_list = data.get("to") or []
+    subject = (data.get("subject") or "(no subject)")[:80]
+    bounce = data.get("bounce") or {}
+    reason = bounce.get("type") or bounce.get("subtype") or ""
+
+    event_label = "bounced" if event_type == "email.bounced" else "spam-complaint"
+    sms_body = (
+        f"E&E email {event_label}\n"
+        f"To: {', '.join(to_list) or 'unknown'}\n"
+        f"Subj: {subject}"
+    )
+    if reason:
+        sms_body += f"\nReason: {reason}"
+
+    if ERICK_PHONE and TWILIO_ACCOUNT_SID and TWILIO_FROM_NUMBER:
+        try:
+            twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            twilio.messages.create(body=sms_body, from_=TWILIO_FROM_NUMBER, to=ERICK_PHONE)
+        except Exception:
+            return jsonify({"status": "sms_failed"}), 200
+
+    return jsonify({"status": "alerted", "event": event_type}), 200
 
 
 @app.route("/sms-feedback", methods=["POST"])
