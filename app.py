@@ -1,7 +1,10 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
+import sqlite3
+import threading
 import time
 import requests
 import resend
@@ -49,6 +52,61 @@ ERICK_PHONE = os.getenv("ERICK_PHONE", "")
 RESEND_WEBHOOK_SECRET = os.getenv("RESEND_WEBHOOK_SECRET", "")
 
 
+RECENT_SENDS_DB = os.getenv("RECENT_SENDS_DB", "/tmp/ee_recent_sends.db")
+_db_lock = threading.Lock()
+
+
+def _db_conn():
+    conn = sqlite3.connect(RECENT_SENDS_DB, timeout=10, check_same_thread=False)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS recent_sends (
+            email_id TEXT PRIMARY KEY,
+            html TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            recipients TEXT NOT NULL,
+            sent_at INTEGER NOT NULL,
+            is_retry INTEGER DEFAULT 0
+        )"""
+    )
+    return conn
+
+
+def remember_send(email_id, html, subject, recipients, is_retry=False):
+    """Persist a send so a later bounce webhook can rebuild and retry it."""
+    if not email_id:
+        return
+    with _db_lock:
+        conn = _db_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO recent_sends VALUES (?, ?, ?, ?, ?, ?)",
+            (email_id, html, subject, json.dumps(recipients), int(time.time()), 1 if is_retry else 0),
+        )
+        conn.execute("DELETE FROM recent_sends WHERE sent_at < ?", (int(time.time()) - 7 * 86400,))
+        conn.commit()
+        conn.close()
+
+
+def recall_send(email_id):
+    if not email_id:
+        return None
+    with _db_lock:
+        conn = _db_conn()
+        row = conn.execute(
+            "SELECT html, subject, recipients, is_retry FROM recent_sends WHERE email_id = ?",
+            (email_id,),
+        ).fetchone()
+        conn.close()
+    if not row:
+        return None
+    return {"html": row[0], "subject": row[1], "recipients": json.loads(row[2]), "is_retry": bool(row[3])}
+
+
+def _summary_email_recipients():
+    to = [e.strip() for e in EMAIL_TO.split(",") if e.strip()]
+    cc = [e.strip() for e in EMAIL_CC.split(",") if e.strip()] if EMAIL_CC else []
+    return to + cc
+
+
 def send_email(subject, html_content, attachments=None):
     to_emails = [e.strip() for e in EMAIL_TO.split(",") if e.strip()]
     payload = {
@@ -61,7 +119,7 @@ def send_email(subject, html_content, attachments=None):
         payload["cc"] = [e.strip() for e in EMAIL_CC.split(",") if e.strip()]
     if attachments:
         payload["attachments"] = attachments
-    resend.Emails.send(payload)
+    return resend.Emails.send(payload)
 
 
 def fetch_recording_attachment(recording_url):
@@ -204,7 +262,9 @@ def webhook():
 
     recording_attachment = fetch_recording_attachment(call.get("recording_url"))
     attachments = [recording_attachment] if recording_attachment else None
-    send_email(subject, html_content, attachments=attachments)
+    send_result = send_email(subject, html_content, attachments=attachments)
+    email_id = send_result.get("id") if isinstance(send_result, dict) else None
+    remember_send(email_id, html_content, subject, _summary_email_recipients())
 
     # Append call to Google Sheet
     if log_call is not None:
@@ -307,9 +367,34 @@ def webhook():
     return jsonify({"status": "email_sent"}), 200
 
 
+BOUNCE_BANNER_HTML = """
+<div style="background:#fff4f4; border:1px solid #c43a3a; padding:12px 16px; margin-bottom:16px; border-radius:6px;">
+<strong>Re-send notice:</strong> The original summary email for this call failed to deliver
+(possibly due to the audio attachment). This copy is being sent <strong>without the audio file</strong>.
+The call recording is still available in your Retell dashboard if you need it.
+</div>
+"""
+
+
+def _notify_operator(subject, body_html):
+    """Send a notification email to Erick only (not to client recipients)."""
+    operator_email = "ewhyte2712@gmail.com"
+    try:
+        resend.Emails.send({
+            "from": EMAIL_FROM,
+            "to": [operator_email],
+            "subject": subject,
+            "html": body_html,
+        })
+    except Exception:
+        pass
+
+
 @app.route("/resend-webhook", methods=["POST"])
 def resend_webhook():
-    """Receive Resend delivery events. On hard-bounce or spam-complaint, text Erick."""
+    """Receive Resend delivery events.
+    On bounce: re-send the same email without the audio attachment, with a notice banner.
+    On complaint: notify Erick by email (do NOT re-send to a recipient who flagged us as spam)."""
     if not RESEND_WEBHOOK_SECRET:
         return jsonify({"status": "secret_not_configured"}), 503
     raw_body = request.get_data()
@@ -318,32 +403,82 @@ def resend_webhook():
 
     payload = request.get_json(silent=True) or {}
     event_type = payload.get("type", "")
-    if event_type not in ("email.bounced", "email.complained"):
+    data = payload.get("data", {}) or {}
+    email_id = data.get("email_id") or data.get("id") or ""
+    bounced_to = data.get("to") or []
+    subject = data.get("subject") or "(no subject)"
+    bounce_info = data.get("bounce") or {}
+    reason = bounce_info.get("type") or bounce_info.get("subtype") or bounce_info.get("message") or ""
+
+    if event_type == "email.complained":
+        _notify_operator(
+            subject=f"[E&E] Spam complaint on summary email — {subject}",
+            body_html=(
+                f"<p>A recipient marked an E&amp;E summary email as spam. Auto-retry was skipped"
+                f" to avoid further reputation damage.</p>"
+                f"<p><b>Original recipient(s):</b> {', '.join(bounced_to) or 'unknown'}<br>"
+                f"<b>Original subject:</b> {subject}<br>"
+                f"<b>Email ID:</b> {email_id}</p>"
+            ),
+        )
+        return jsonify({"status": "complaint_logged"}), 200
+
+    if event_type != "email.bounced":
         return jsonify({"status": "ignored", "type": event_type}), 200
 
-    data = payload.get("data", {}) or {}
-    to_list = data.get("to") or []
-    subject = (data.get("subject") or "(no subject)")[:80]
-    bounce = data.get("bounce") or {}
-    reason = bounce.get("type") or bounce.get("subtype") or ""
+    record = recall_send(email_id)
+    if not record:
+        _notify_operator(
+            subject=f"[E&E] Summary email bounced — could not auto-retry (no cache)",
+            body_html=(
+                f"<p>An E&amp;E summary email bounced, but the original content is no longer"
+                f" in the local cache (cache lost on redeploy or older than 7 days).</p>"
+                f"<p><b>Bounced recipient(s):</b> {', '.join(bounced_to) or 'unknown'}<br>"
+                f"<b>Subject:</b> {subject}<br>"
+                f"<b>Reason:</b> {reason or 'unknown'}<br>"
+                f"<b>Email ID:</b> {email_id}</p>"
+                f"<p>You'll need to check Retell directly for the call this corresponds to.</p>"
+            ),
+        )
+        return jsonify({"status": "no_cached_send"}), 200
 
-    event_label = "bounced" if event_type == "email.bounced" else "spam-complaint"
-    sms_body = (
-        f"E&E email {event_label}\n"
-        f"To: {', '.join(to_list) or 'unknown'}\n"
-        f"Subj: {subject}"
-    )
-    if reason:
-        sms_body += f"\nReason: {reason}"
+    if record["is_retry"]:
+        _notify_operator(
+            subject=f"[E&E] Bounce retry ALSO bounced — manual follow-up needed",
+            body_html=(
+                f"<p>A retry summary email (already sent without the audio attachment) also bounced."
+                f" Not retrying again to avoid loops.</p>"
+                f"<p><b>Recipient(s):</b> {', '.join(record['recipients'])}<br>"
+                f"<b>Subject:</b> {record['subject']}<br>"
+                f"<b>Reason:</b> {reason or 'unknown'}</p>"
+                f"<p>The recipient likely has a delivery problem unrelated to the attachment.</p>"
+            ),
+        )
+        return jsonify({"status": "retry_also_bounced"}), 200
 
-    if ERICK_PHONE and TWILIO_ACCOUNT_SID and TWILIO_FROM_NUMBER:
-        try:
-            twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            twilio.messages.create(body=sms_body, from_=TWILIO_FROM_NUMBER, to=ERICK_PHONE)
-        except Exception:
-            return jsonify({"status": "sms_failed"}), 200
-
-    return jsonify({"status": "alerted", "event": event_type}), 200
+    retry_subject = f"[Re-send] {record['subject']}"
+    retry_html = BOUNCE_BANNER_HTML + record["html"]
+    try:
+        retry_result = resend.Emails.send({
+            "from": EMAIL_FROM,
+            "to": record["recipients"],
+            "subject": retry_subject,
+            "html": retry_html,
+        })
+        retry_id = retry_result.get("id") if isinstance(retry_result, dict) else None
+        remember_send(retry_id, retry_html, retry_subject, record["recipients"], is_retry=True)
+        return jsonify({"status": "retried", "retry_email_id": retry_id}), 200
+    except Exception as exc:
+        _notify_operator(
+            subject=f"[E&E] Bounce-retry FAILED to send",
+            body_html=(
+                f"<p>Tried to auto-retry a bounced summary email but the retry send itself errored.</p>"
+                f"<p><b>Recipient(s):</b> {', '.join(record['recipients'])}<br>"
+                f"<b>Subject:</b> {record['subject']}<br>"
+                f"<b>Error:</b> {exc}</p>"
+            ),
+        )
+        return jsonify({"status": "retry_send_failed"}), 200
 
 
 @app.route("/sms-feedback", methods=["POST"])
