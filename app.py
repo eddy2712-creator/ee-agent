@@ -670,6 +670,25 @@ def jobber_callback():
 </body></html>"""
 
 
+@app.route("/jobber/diag", methods=["GET"])
+def jobber_diag():
+    """One-shot schema introspection. Gated by DASHBOARD_API_KEY.
+
+    Usage: /jobber/diag?key=<DASHBOARD_API_KEY>
+    Returns input fields for ClientCreateInput and RequestCreateInput plus
+    a filtered list of mutation names so we can pick the right one.
+    """
+    if jobber_client is None:
+        return jsonify({"error": "jobber_client not loaded"}), 500
+    if not DASHBOARD_API_KEY or request.args.get("key") != DASHBOARD_API_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify({
+        "ClientCreateInput": jobber_client.introspect_input("ClientCreateInput"),
+        "RequestCreateInput": jobber_client.introspect_input("RequestCreateInput"),
+        "mutations": jobber_client.list_mutation_names(),
+    })
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "version": "2.9"}), 200

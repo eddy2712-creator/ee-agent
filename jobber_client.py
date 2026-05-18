@@ -177,6 +177,47 @@ def create_note(client_id, body):
         return False
 
 
+def introspect_input(type_name):
+    """Return the input fields for a GraphQL input type. Returns {} on failure."""
+    query = """
+        query Introspect($name: String!) {
+            __type(name: $name) {
+                name
+                inputFields {
+                    name
+                    type { name kind ofType { name kind ofType { name kind } } }
+                }
+            }
+        }
+    """
+    try:
+        data = _graphql(query, {"name": type_name})
+        t = data.get("__type") or {}
+        out = {"type": t.get("name"), "fields": []}
+        for f in (t.get("inputFields") or []):
+            tinfo = f["type"]
+            tname = tinfo.get("name") or (tinfo.get("ofType") or {}).get("name") or (((tinfo.get("ofType") or {}).get("ofType")) or {}).get("name")
+            out["fields"].append({"name": f["name"], "type": tname, "kind": tinfo.get("kind")})
+        return out
+    except Exception as e:
+        return {"type": type_name, "error": str(e), "fields": []}
+
+
+def list_mutation_names():
+    """Return mutation field names that contain 'create' or 'request' — for discovery."""
+    query = """
+        query { __schema { mutationType { fields { name } } } }
+    """
+    try:
+        data = _graphql(query)
+        fields = data.get("__schema", {}).get("mutationType", {}).get("fields", [])
+        names = [f["name"] for f in fields]
+        relevant = [n for n in names if "create" in n.lower() or "request" in n.lower() or "lead" in n.lower()]
+        return {"relevant": sorted(relevant), "total": len(names)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def upsert_lead(name, phone="", email="", address="", call_summary=""):
     """Find or create a client, attach a call-summary note. Returns the client id."""
     client_id = find_client_by_phone(phone) if phone else None
