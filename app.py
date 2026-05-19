@@ -308,15 +308,16 @@ def webhook():
                 f"Lead temperature: {lead_temperature}\n"
                 f"Preferred availability: {preferred_availability or 'not provided'}"
             )
-            jobber_client.upsert_lead(
+            jobber_result = jobber_client.upsert_lead(
                 name=caller_name,
                 phone=caller_phone or from_number,
                 email=caller_email,
                 address=property_address,
                 call_summary=note_body,
             )
-        except Exception:
-            pass  # Don't let Jobber issues break email delivery
+            print(f"[jobber] upsert_lead -> {jobber_result}", flush=True)
+        except Exception as e:
+            print(f"[jobber] upsert_lead failed: {e}", flush=True)
 
     # Post-call feedback survey: text the caller asking them to rate Emily.
     # Gate: must be enabled, real conversation (>= 30s), not flagged spam, not the business owner's own number.
@@ -682,9 +683,16 @@ def jobber_diag():
         return jsonify({"error": "jobber_client not loaded"}), 500
     if not DASHBOARD_API_KEY or request.args.get("key") != DASHBOARD_API_KEY:
         return jsonify({"error": "unauthorized"}), 401
+    custom_type = request.args.get("type")
+    if custom_type:
+        return jsonify({custom_type: jobber_client.introspect_input(custom_type)})
+    mutation_name = request.args.get("mutation")
+    if mutation_name:
+        return jsonify({mutation_name: jobber_client.introspect_mutation_args(mutation_name)})
     return jsonify({
         "ClientCreateInput": jobber_client.introspect_input("ClientCreateInput"),
         "RequestCreateInput": jobber_client.introspect_input("RequestCreateInput"),
+        "RequestDetailsInput": jobber_client.introspect_input("RequestDetailsInput"),
         "mutations": jobber_client.list_mutation_names(),
     })
 

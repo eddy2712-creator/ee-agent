@@ -99,21 +99,43 @@ def _graphql(query, variables=None):
     return body.get("data", {})
 
 
+def _digits_only(phone):
+    """Strip everything but digits. '+1 (780) 555-1234' -> '17805551234'."""
+    return "".join(c for c in (phone or "") if c.isdigit())
+
+
+def _last10(phone):
+    """Last 10 digits — robust to country-code presence/absence."""
+    d = _digits_only(phone)
+    return d[-10:] if len(d) >= 10 else d
+
+
 def find_client_by_phone(phone):
-    """Returns the first matching client id, or None."""
-    if not phone:
+    """Search Jobber by phone using last-10-digit match. Returns the first true match's id, or None.
+
+    Why: Jobber's searchTerm is fuzzy text search; a raw phone like '+17805551234' may miss
+    a stored number formatted as '(780) 555-1234'. We search with the last-10-digit form
+    and then verify each result's phone digits actually contain our number — preventing
+    false-positive matches from substring noise.
+    """
+    target = _last10(phone)
+    if not target:
         return None
     query = """
         query SearchClients($term: String!) {
-            clients(searchTerm: $term, first: 5) {
+            clients(searchTerm: $term, first: 10) {
                 nodes { id firstName lastName phones { number } }
             }
         }
     """
     try:
-        data = _graphql(query, {"term": phone})
-        nodes = data.get("clients", {}).get("nodes", [])
-        return nodes[0]["id"] if nodes else None
+        data = _graphql(query, {"term": target})
+        nodes = data.get("clients", {}).get("nodes", []) or []
+        for node in nodes:
+            for ph in node.get("phones", []) or []:
+                if _last10(ph.get("number", "")) == target:
+                    return node["id"]
+        return None
     except Exception:
         return None
 
@@ -159,19 +181,66 @@ def create_client(name, phone="", email="", address=""):
 
 
 def create_note(client_id, body):
-    """Attach a note to a client. Returns True if created, False on failure (non-fatal)."""
+    """Attach a note to a client. Returns True on success, False on failure (non-fatal)."""
     if not client_id or not body:
         return False
     mutation = """
-        mutation CreateNote($input: ClientNoteCreateInput!) {
-            clientNoteCreate(input: $input) {
+        mutation AddClientNote($clientId: EncodedId!, $input: ClientCreateNoteInput!) {
+            clientCreateNote(clientId: $clientId, input: $input) {
                 clientNote { id }
                 userErrors { message path }
             }
         }
     """
     try:
-        _graphql(mutation, {"input": {"clientId": client_id, "message": body}})
+        _graphql(mutation, {"clientId": client_id, "input": {"message": body}})
+        return True
+    except Exception:
+        return False
+
+
+def create_request(client_id, title):
+    """Create a Jobber Request for a client. Returns the request id, or None on failure.
+
+    Why: a Request is what flips Jobber's automatic 'lead' tag on a new client. Creating a
+    bare Client via clientCreate leaves them un-tagged, which is why Sara/Craig saw every
+    caller showing up as a regular client. Routing every Emily intake through requestCreate
+    puts new callers into the Requests inbox as leads.
+    """
+    if not client_id:
+        return None
+    mutation = """
+        mutation CreateRequest($input: RequestCreateInput!) {
+            requestCreate(input: $input) {
+                request { id }
+                userErrors { message path }
+            }
+        }
+    """
+    try:
+        data = _graphql(mutation, {"input": {"clientId": client_id, "title": title or "Phone intake"}})
+        result = data.get("requestCreate", {})
+        if result.get("userErrors"):
+            return None
+        return (result.get("request") or {}).get("id")
+    except Exception:
+        return None
+
+
+def create_request_note(request_id, body):
+    """Attach a note to a Request. Returns True on success, False on failure (non-fatal)."""
+    if not request_id or not body:
+        return False
+    mutation = """
+        mutation AddRequestNote($requestId: EncodedId!, $input: RequestCreateNoteInput!) {
+            requestCreateNote(requestId: $requestId, input: $input) {
+                requestNote { id }
+                userErrors { message path }
+            }
+        }
+    """
+    try:
+        _graphql(mutation, {"requestId": request_id, "input": {"message": body}})
         return True
     except Exception:
         return False
@@ -203,6 +272,36 @@ def introspect_input(type_name):
         return {"type": type_name, "error": str(e), "fields": []}
 
 
+def introspect_mutation_args(field_name):
+    """Return the argument list for a mutation field."""
+    query = """
+        query Args {
+            __schema {
+                mutationType {
+                    fields {
+                        name
+                        args { name type { name kind ofType { name kind } } }
+                    }
+                }
+            }
+        }
+    """
+    try:
+        data = _graphql(query)
+        fields = data.get("__schema", {}).get("mutationType", {}).get("fields", [])
+        for f in fields:
+            if f["name"] == field_name:
+                args = []
+                for a in f.get("args", []):
+                    t = a["type"]
+                    tname = t.get("name") or (t.get("ofType") or {}).get("name")
+                    args.append({"name": a["name"], "type": tname, "kind": t.get("kind")})
+                return {"name": field_name, "args": args}
+        return {"name": field_name, "error": "field not found"}
+    except Exception as e:
+        return {"name": field_name, "error": str(e)}
+
+
 def list_mutation_names():
     """Return mutation field names that contain 'create' or 'request' — for discovery."""
     query = """
@@ -219,10 +318,34 @@ def list_mutation_names():
 
 
 def upsert_lead(name, phone="", email="", address="", call_summary=""):
-    """Find or create a client, attach a call-summary note. Returns the client id."""
+    """Find or create a client, create a Request for the call, attach the call summary.
+
+    Returns dict {client_id, request_id, was_existing_client} so the caller can log/alert.
+
+    Flow:
+      1. Search Jobber by last-10-digit phone match (false-positive resistant).
+      2. If no match: clientCreate.
+      3. requestCreate against the client — this is what auto-tags new clients as leads
+         and surfaces the call in Sara/Craig's Requests inbox.
+      4. requestCreateNote with the full call summary (so the Request page shows what was
+         discussed). If the Request couldn't be created, fall back to attaching the note
+         directly on the Client so the summary still lands somewhere.
+    """
+    was_existing = False
     client_id = find_client_by_phone(phone) if phone else None
-    if not client_id:
+    if client_id:
+        was_existing = True
+    else:
         client_id = create_client(name, phone=phone, email=email, address=address)
+
+    request_title = f"Phone intake — {name}" if name else "Phone intake"
+    request_id = create_request(client_id, request_title)
+
     if call_summary:
-        create_note(client_id, call_summary)
-    return client_id
+        attached = False
+        if request_id:
+            attached = create_request_note(request_id, call_summary)
+        if not attached:
+            create_note(client_id, call_summary)
+
+    return {"client_id": client_id, "request_id": request_id, "was_existing_client": was_existing}
